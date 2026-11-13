@@ -1,0 +1,533 @@
+#pragma kernel PropagateTrunks
+#pragma kernel InjectTrunks
+#pragma kernel TraceSkyVisibility
+#pragma kernel PropagateMixed LRT_MIXED_PROBES
+#pragma kernel InjectMixed LRT_MIXED_PROBES
+#pragma kernel TraceSkyMixed LRT_MIXED_PROBES
+#pragma kernel PublishMixed LRT_MIXED_PROBES
+
+#include "LrtLighting.hlsl"
+
+static const int3 Directions[6] =
+{
+    int3(1, 0, 0), int3(-1, 0, 0), int3(0, 1, 0),
+    int3(0, -1, 0), int3(0, 0, 1), int3(0, 0, -1)
+};
+
+int3 _GridSize;
+uint _TrunkSize;
+uint3 _TrunkGridSize;
+uint _CellsPerTrunk;
+uint _OccupiedCells;
+uint _SkyFirstCell;
+uint _SkyEndCell;
+uint _SkyRayCount;
+float4 _LrtGridOrigin;
+float3 _LrtCellSpacing;
+float4 _LrtSunDirection;
+float4 _LrtSunColor;
+
+StructuredBuffer<float4> _Voxels;
+StructuredBuffer<int> _TrunkMap;
+RWStructuredBuffer<float4> _Injection;
+StructuredBuffer<float4> _InjectionRead;
+StructuredBuffer<float4> _Read;
+RWStructuredBuffer<float4> _Write;
+RWTexture3D<float4> _LrtVolume;
+RWStructuredBuffer<float4> _SkySH;
+#ifdef LRT_MIXED_PROBES
+StructuredBuffer<uint4> _LrtProbeLayout;
+RWTexture3D<float4> _LrtFineVolume;
+uint _MixedProbeCount;
+uint _MixedCoarseProbeCount;
+uint _MixedCoarseTrunks;
+uint _MixedCoarseEdge;
+uint _MixedPublishCount;
+uint3 _MixedFineTiles;
+uint3 _MixedCoarseTiles;
+float _LrtProbeTrunkEdge;
+
+uint3 Unflatten(uint index, uint3 size)
+{
+    uint row = index / size.x;
+    return uint3(index % size.x, row % size.y, row / size.y);
+}
+
+uint Cube(uint edge)
+{
+    return edge * edge * edge;
+}
+
+uint3 MixedWorldTrunk(uint index)
+{
+    return Unflatten(_LrtProbeLayout[index].w, _TrunkGridSize);
+}
+
+float3 MixedCenter(uint3 trunk, int3 local, uint edge)
+{
+    return _LrtGridOrigin.xyz + (trunk + (float3(local) + 0.5) / edge) * _LrtProbeTrunkEdge;
+}
+
+float3 MixedProbePosition(uint index, out int edge, out int3 local)
+{
+    bool fine = index >= _MixedCoarseProbeCount;
+    edge = fine ? _TrunkSize : _MixedCoarseEdge;
+    uint relative = fine ? index - _MixedCoarseProbeCount : index;
+    uint perBrick = Cube(edge);
+    uint slot = relative / perBrick;
+    uint3 trunk = MixedWorldTrunk(slot + (fine ? _MixedCoarseTrunks : 0));
+    local = int3(Unflatten(relative % perBrick, edge.xxx));
+    return MixedCenter(trunk, local, edge);
+}
+
+float3 MixedProbePosition(uint index)
+{
+    int edge;
+    int3 local;
+    return MixedProbePosition(index, edge, local);
+}
+
+int3 GeometryCell(float3 center)
+{
+    return clamp(int3(floor((center - _LrtGridOrigin.xyz) / _LrtCellSpacing + 0.0001)), 0, _GridSize - 1);
+}
+
+uint MixedProbeAt(float3 world, out int3 geometryCell)
+{
+    float3 grid = clamp((world - _LrtGridOrigin.xyz) / _LrtProbeTrunkEdge,
+        0.0, float3(_TrunkGridSize) - 0.0001);
+    uint3 trunk = uint3(grid);
+    uint4 brick = _LrtProbeLayout[trunk.x + _TrunkGridSize.x * (trunk.y + _TrunkGridSize.y * trunk.z)];
+    uint edge = brick.y;
+    uint3 local = min(uint3((grid - trunk) * edge), edge - 1);
+    geometryCell = GeometryCell(MixedCenter(trunk, local, edge));
+    return brick.x + local.x + edge * (local.y + edge * local.z);
+}
+
+bool MixedNeighbor(float3 center, float spacing, int3 direction, out uint index, out int3 geometryCell)
+{
+    // Address the receiving cell just across the shared face, including at a density transition.
+    float3 samplePosition = center + direction * (spacing * 0.5 + _LrtCellSpacing.x * 0.001);
+    float3 local = (samplePosition - _LrtGridOrigin.xyz) / _LrtProbeTrunkEdge;
+    if (any(local < 0.0) || any(local >= float3(_TrunkGridSize)))
+    {
+        index = 0;
+        geometryCell = 0;
+        return false;
+    }
+    index = MixedProbeAt(samplePosition, geometryCell);
+    return true;
+}
+#endif
+
+uint CellIndex(int3 p)
+{
+    return p.x + _GridSize.x * (p.y + _GridSize.y * p.z);
+}
+
+bool Inside(int3 p)
+{
+    return all(p >= 0) && all(p < _GridSize);
+}
+
+uint TrunkIndex(uint3 p)
+{
+    return p.x + _TrunkGridSize.x * (p.y + _TrunkGridSize.y * p.z);
+}
+
+uint PackedVoxelIndex(uint slot, uint3 local)
+{
+    return slot * _CellsPerTrunk + local.x + _TrunkSize * (local.y + _TrunkSize * local.z);
+}
+
+int VoxelIndex(int3 p)
+{
+    uint3 trunk = uint3(p) / _TrunkSize;
+    int slot = _TrunkMap[TrunkIndex(trunk)];
+    return slot < 0 ? -1 : (int)PackedVoxelIndex(slot, uint3(p) - trunk * _TrunkSize);
+}
+
+float4 ReadVoxel(int index)
+{
+    float4 voxel = 0.0;
+    [branch] if (index >= 0)
+        voxel = _Voxels[index];
+    return voxel;
+}
+
+// Traverse grid cells in ray order, including across trunk boundaries.
+bool LrtIsOccluded(float3 rayOrigin, float3 ray, float maxDistance)
+{
+    float3 start = (rayOrigin - _LrtGridOrigin.xyz) / _LrtCellSpacing;
+    float3 direction = ray / _LrtCellSpacing;
+    int3 p = int3(floor(start));
+    int3 stepDirection = int3(sign(direction));
+    float3 boundary = float3(p) + max(stepDirection, 0);
+    float3 delta = rcp(max(abs(direction), 1e-8));
+    float3 next = abs(boundary - start) * delta;
+    next = lerp(next, 1e20, step(abs(direction), 1e-8));
+    [loop] while (Inside(p))
+    {
+        uint3 trunk = uint3(p) / _TrunkSize;
+        int slot = _TrunkMap[TrunkIndex(trunk)];
+        int3 lower = int3(trunk * _TrunkSize);
+        int3 upper = lower + int(_TrunkSize);
+        if (slot < 0)
+        {
+            // Advance to the first cell outside this air trunk without testing its voxels.
+            int3 stepsToExit = max(stepDirection, 0) * (upper - p)
+                             + max(-stepDirection, 0) * (p - lower + 1);
+            float3 exitTime = next + (stepsToExit - 1) * delta;
+            float t = min(exitTime.x, min(exitTime.y, exitTime.z));
+            if (t >= maxDistance)
+                return false;
+            float3 crossings = floor((t + 1e-6 - next) / delta) + 1.0;
+            int3 crossed = int3(clamp(crossings, 0.0, float3(stepsToExit)));
+            // Force the exit axis even if the division rounded down at the boundary.
+            crossed = max(crossed, int3(step(exitTime, t + 1e-6)) * stepsToExit);
+            p += crossed * stepDirection;
+            next += crossed * delta;
+        }
+        else
+        {
+            [loop] do
+            {
+                if (_Voxels[PackedVoxelIndex(slot, p - lower)].a != 0)
+                    return true;
+                float t = min(next.x, min(next.y, next.z));
+                if (t >= maxDistance)
+                    return false;
+                float3 crossAxis = step(next, t + 1e-6);
+                p += int3(crossAxis) * stepDirection;
+                next += crossAxis * delta;
+            }
+            while (all(p >= lower) && all(p < upper));
+        }
+    }
+    return false;
+}
+
+float3 CellCenter(int3 p)
+{
+    return _LrtGridOrigin.xyz + (p + 0.5) * _LrtCellSpacing;
+}
+
+float4 ReadIncoming(uint neighborIndex, uint face)
+{
+    // Basis (1, x, y, z). Evaluate along the axis pointing back from the neighbor.
+    uint coefficient = 4 * neighborIndex;
+    float sign = (face & 1u) != 0u ? 1.0 : -1.0;
+    float4 incoming = _Read[coefficient] + sign * _Read[coefficient + 1 + face / 2];
+    incoming.a = 0.0;
+    return incoming;
+}
+
+float3 DirectionalInjection(float3 position, float3 normal)
+{
+    float3 toSun = _LrtSunDirection.xyz;
+    float cosine = dot(normal, toSun);
+    if (cosine <= 0.0)
+        return 0.0;
+    if (LrtIsOccluded(position + normal * 0.015, toSun, 1e20))
+        return 0.0;
+    return _LrtSunColor.rgb * cosine;
+}
+
+// Every tier samples the upper hemisphere. Higher tiers add elevations and azimuths.
+static const float3 SkyDirections[17] =
+{
+    float3(0, 1, 0),
+    float3(0.8660, 0.5000, 0), float3(-0.8660, 0.5000, 0),
+    float3(0, 0.5000, 0.8660), float3(0, 0.5000, -0.8660),
+    float3(0.4056, 0.8192, 0.4056), float3(-0.4056, 0.8192, 0.4056),
+    float3(0.4056, 0.8192, -0.4056), float3(-0.4056, 0.8192, -0.4056),
+    float3(0.6645, 0.3420, 0.6645), float3(-0.6645, 0.3420, 0.6645),
+    float3(0.6645, 0.3420, -0.6645), float3(-0.6645, 0.3420, -0.6645),
+    float3(0.6157, 0.7880, 0), float3(-0.6157, 0.7880, 0),
+    float3(0, 0.7880, 0.6157), float3(0, 0.7880, -0.6157)
+};
+
+[numthreads(64, 1, 1)]
+#ifdef LRT_MIXED_PROBES
+void TraceSkyMixed(uint3 id : SV_DispatchThreadID)
+#else
+void TraceSkyVisibility(uint3 id : SV_DispatchThreadID)
+#endif
+{
+    uint index = _SkyFirstCell + id.x;
+    if (index >= _SkyEndCell)
+        return;
+
+#ifdef LRT_MIXED_PROBES
+    float3 center = MixedProbePosition(index);
+    int3 p = GeometryCell(center);
+#else
+    uint row = index / (uint)_GridSize.x;
+    int3 p = int3(index % (uint)_GridSize.x, row % (uint)_GridSize.y, row / (uint)_GridSize.y);
+    float3 center = CellCenter(p);
+#endif
+    bool solid = ReadVoxel(VoxelIndex(p)).a != 0;
+    float4 visibility = 0.0;
+    if (!solid)
+    {
+        float3 sampledDirections = 0.0;
+        float3 visibleDirections = 0.0;
+        uint visibleCount = 0;
+        [loop] for (uint i = 0; i < _SkyRayCount; i++)
+        {
+            float3 direction = SkyDirections[i];
+            sampledDirections += direction;
+            if (!LrtIsOccluded(center, direction, 1e20))
+            {
+                visibleDirections += direction;
+                visibleCount++;
+            }
+        }
+
+        float mean = (float)visibleCount / _SkyRayCount;
+        // Remove the hemisphere's inherent up bias so open sky is 1 in every direction.
+        float3 directional = (visibleDirections - mean * sampledDirections) * (2.0 / _SkyRayCount);
+        float bandLimit = min(mean, 1.0 - mean);
+        directional *= saturate(bandLimit * rsqrt(max(dot(directional, directional), 1e-12)));
+        // Store the direction of incoming light so RGB and sky share the same basis.
+        visibility = float4(mean, -directional);
+    }
+
+    [unroll] for (uint coefficient = 0; coefficient < 4; coefficient++)
+    {
+        uint offset = 4 * index + coefficient;
+        float4 sh = float4(_SkySH[offset].rgb, visibility[coefficient]);
+        _SkySH[offset] = sh;
+#ifndef LRT_MIXED_PROBES
+        _LrtVolume[int3(p.xy, p.z + coefficient * _GridSize.z)] = solid ? 0.0 : sh;
+#endif
+    }
+}
+
+[numthreads(64, 1, 1)]
+#ifdef LRT_MIXED_PROBES
+void InjectMixed(uint3 id : SV_DispatchThreadID)
+#else
+void InjectTrunks(uint3 id : SV_DispatchThreadID)
+#endif
+{
+    uint index = id.x;
+    [branch] if (index >= _OccupiedCells)
+        return;
+#ifdef LRT_MIXED_PROBES
+    float3 center = MixedProbePosition(index);
+    int3 p = GeometryCell(center);
+    if (ReadVoxel(VoxelIndex(p)).a == 0)
+        return;
+#else
+    if (_Voxels[index].a == 0)
+        return;
+
+    uint slot = index / _CellsPerTrunk;
+    uint trunkCount = _TrunkGridSize.x * _TrunkGridSize.y * _TrunkGridSize.z;
+    uint trunkIndex = _TrunkMap[trunkCount + slot];
+    uint trunkRow = trunkIndex / _TrunkGridSize.x;
+    uint3 trunk = uint3(trunkIndex % _TrunkGridSize.x, trunkRow % _TrunkGridSize.y, trunkRow / _TrunkGridSize.y);
+    uint localIndex = index - slot * _CellsPerTrunk;
+    uint localRow = localIndex / _TrunkSize;
+    uint3 local = uint3(localIndex % _TrunkSize, localRow % _TrunkSize, localRow / _TrunkSize);
+    int3 p = int3(trunk * _TrunkSize + local);
+#endif
+    [unroll] for (uint face = 0; face < 6; face++)
+    {
+        int3 neighbor = p + Directions[face];
+        float3 incident = 0.0;
+        bool open = true;
+        [branch] if (Inside(neighbor))
+            open = ReadVoxel(VoxelIndex(neighbor)).a == 0;
+        if (open)
+        {
+            float3 normal = Directions[face];
+            float3 samplePosition = CellCenter(p) + normal * (_LrtCellSpacing * 0.5);
+            incident = LrtPunctualLighting(samplePosition, normal)
+                     + LrtAreaLighting(samplePosition, normal)
+                     + DirectionalInjection(samplePosition, normal);
+        }
+        _Injection[6 * index + face] = float4(incident, 0.0);
+    }
+}
+
+void PropagateCell(uint3 id)
+{
+#ifdef LRT_MIXED_PROBES
+    uint index = id.x;
+    if (index >= _MixedProbeCount)
+        return;
+    int edge;
+    int3 local;
+    float3 center = MixedProbePosition(index, edge, local);
+    float spacing = _LrtProbeTrunkEdge / edge;
+    int3 p = GeometryCell(center);
+#else
+    int3 p = int3(id);
+    if (!Inside(p))
+        return;
+
+    uint index = CellIndex(p);
+#endif
+    int voxelIndex = VoxelIndex(p);
+    float4 voxel = ReadVoxel(voxelIndex);
+    float4 incoming[6];
+    bool openFace[6];
+
+    // Incoming lobe indexed by the face through which it enters this cell.
+    [unroll] for (uint face = 0; face < 6; face++)
+    {
+#ifdef LRT_MIXED_PROBES
+        int3 neighbor;
+        uint neighborIndex;
+        int3 direction = Directions[face];
+        int3 localNeighbor = local + direction;
+        bool inside = true;
+        if (all(localNeighbor >= 0) && all(localNeighbor < edge))
+        {
+            neighborIndex = (int)index + direction.x + edge * (direction.y + edge * direction.z);
+            neighbor = GeometryCell(center + direction * spacing);
+        }
+        else
+            inside = MixedNeighbor(center, spacing, direction, neighborIndex, neighbor);
+#else
+        int3 neighbor = p + Directions[face];
+        bool inside = Inside(neighbor);
+#endif
+        incoming[face] = 0.0;
+        openFace[face] = true;
+        if (inside)
+        {
+#ifndef LRT_MIXED_PROBES
+            uint neighborIndex = CellIndex(neighbor);
+#endif
+            // Only solid cells need to check if their neighbor is open.
+            [branch] if (voxel.a != 0)
+                openFace[face] = ReadVoxel(VoxelIndex(neighbor)).a == 0;
+            incoming[face] = openFace[face] ? ReadIncoming(neighborIndex, face) : 0.0;
+        }
+    }
+
+    float3 surfaceIncoming[6];
+    [unroll] for (uint surface = 0; surface < 6; surface++)
+    {
+        surfaceIncoming[surface] = 0.0;
+        if (voxel.a != 0 && openFace[surface])
+        {
+#ifdef LRT_MIXED_PROBES
+            surfaceIncoming[surface] = incoming[surface].rgb + _InjectionRead[6 * index + surface].rgb;
+#else
+            surfaceIncoming[surface] = incoming[surface].rgb + _InjectionRead[6 * voxelIndex + surface].rgb;
+#endif
+        }
+    }
+
+    float4 directional[6];
+    [unroll] for (uint lobe = 0; lobe < 6; lobe++)
+    {
+        float4 outgoing = 0.0;
+        if (voxel.a == 0)
+        {
+            // Upwind transport. Modest angular spread fills gaps between the six directions.
+            [unroll] for (uint from = 0; from < 6; from++)
+            {
+                if (from != lobe)
+                    outgoing += incoming[from] * (from == (lobe ^ 1) ? 0.68 : 0.08);
+            }
+            outgoing.rgb *= 0.92;
+        }
+        else if (openFace[lobe])
+        {
+            // Each exposed face returns 60% of its response forward
+            // and 10% into each perpendicular direction.
+            float3 reflected = 0.0;
+            [unroll] for (uint from = 0; from < 6; from++)
+            {
+                if (from != (lobe ^ 1))
+                    reflected += surfaceIncoming[from] * (from == lobe ? 0.60 : 0.10);
+            }
+            outgoing.rgb = reflected * voxel.rgb;
+        }
+
+        directional[lobe] = outgoing;
+    }
+
+    // Project the six equal-weight axis samples onto real SH bands L0 and L1.
+    // Fold the basis normalization into the coefficients so evaluation is C0 + dot(C1, direction).
+    float4 sh[4];
+    sh[0] = (directional[0] + directional[1] + directional[2] +
+             directional[3] + directional[4] + directional[5]) / 6.0;
+    sh[1] = (directional[0] - directional[1]) * 0.5;
+    sh[2] = (directional[2] - directional[3]) * 0.5;
+    sh[3] = (directional[4] - directional[5]) * 0.5;
+
+    // Limit the directional band without changing the mean. This keeps RGB
+    // nonnegative and sky visibility within [0, 1] even after many iterations.
+    float4 bandLimit = float4(sh[0].rgb, saturate(min(sh[0].a, 1.0 - sh[0].a)));
+    float4 bandSquared = sh[1] * sh[1] + sh[2] * sh[2] + sh[3] * sh[3];
+    float4 bandScale = saturate(bandLimit * rsqrt(max(bandSquared, 1e-12)));
+    sh[1] *= bandScale;
+    sh[2] *= bandScale;
+    sh[3] *= bandScale;
+
+    [unroll] for (uint coefficient = 0; coefficient < 4; coefficient++)
+    {
+        uint offset = 4 * index + coefficient;
+        // Sky is local to this probe and survives each RGB ping-pong step.
+        sh[coefficient].a = _Read[offset].a;
+        _Write[offset] = sh[coefficient];
+        // Store solid boundary coefficients for propagation only.
+#ifndef LRT_MIXED_PROBES
+        _LrtVolume[int3(p.xy, p.z + coefficient * _GridSize.z)] = voxel.a == 0 ? sh[coefficient] : 0.0;
+#endif
+    }
+}
+
+
+#ifdef LRT_MIXED_PROBES
+[numthreads(64, 1, 1)]
+void PropagateMixed(uint3 id : SV_DispatchThreadID)
+{
+    PropagateCell(id);
+}
+
+[numthreads(64, 1, 1)]
+void PublishMixed(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _MixedPublishCount)
+        return;
+
+    uint coarsePitch = _MixedCoarseEdge + 2;
+    uint coarseCells = _MixedCoarseTrunks * Cube(coarsePitch);
+    bool fine = id.x >= coarseCells;
+    uint edge = fine ? _TrunkSize : _MixedCoarseEdge;
+    uint pitch = edge + 2;
+    uint relative = fine ? id.x - coarseCells : id.x;
+    uint slot = relative / Cube(pitch);
+    uint3 pixel = Unflatten(relative % Cube(pitch), pitch.xxx);
+    uint3 trunk = MixedWorldTrunk(slot + (fine ? _MixedCoarseTrunks : 0));
+    int3 geometryCell;
+    // A one-cell apron lets hardware trilinear filtering cross brick boundaries.
+    uint probe = MixedProbeAt(MixedCenter(trunk, int3(pixel) - 1, edge), geometryCell);
+    bool solid = ReadVoxel(VoxelIndex(geometryCell)).a != 0;
+    uint3 tiles = fine ? _MixedFineTiles : _MixedCoarseTiles;
+    uint3 texel = Unflatten(slot, tiles) * pitch + pixel;
+    uint slabDepth = tiles.z * pitch;
+    [unroll] for (uint coefficient = 0; coefficient < 4; coefficient++)
+    {
+        float4 value = solid ? 0.0 : _Read[4 * probe + coefficient];
+        uint3 address = texel + uint3(0, 0, slabDepth * coefficient);
+        if (fine)
+            _LrtFineVolume[address] = value;
+        else
+            _LrtVolume[address] = value;
+    }
+}
+#else
+[numthreads(4, 4, 4)]
+void PropagateTrunks(uint3 id : SV_DispatchThreadID)
+{
+    PropagateCell(id);
+}
+#endif
