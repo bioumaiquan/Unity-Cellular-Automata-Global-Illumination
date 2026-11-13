@@ -10,6 +10,8 @@ using UnityEngine.Serialization;
 [DisallowMultipleComponent]
 public sealed class LocalRadianceTransferDemo : MonoBehaviour
 {
+    internal const int NativeUrpView = 4;
+    internal static readonly int DebugViewId = Shader.PropertyToID("_LrtTrunkDebug");
     private const int CoefficientsPerProbe = 4;
     private const int ProbeStride = 4 * sizeof(float);
     public const int MaxProbeCount = 1024 * 1024;
@@ -52,6 +54,8 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
     private float probeMarkerRadius = 0.075f;
     [SerializeField, Range(1, 8), Tooltip("Draw every Nth probe along each axis.")]
     private int probeDrawStride = 1;
+    [SerializeField, Min(0f), Tooltip("Offset along the surface normal in grid cells. Mixed layouts use the fine grid spacing. Set to 0 to disable.")]
+    private float probeNormalOffset = 1f;
     [FormerlySerializedAs("skySampleRadius")]
     [SerializeField, Range(0f, 1f)] private float probeSampleRadius = 0.5f;
     [SerializeField, Range(0f, 1f), Tooltip("Sky occlusion strength in the Sky visibility view.")]
@@ -134,6 +138,7 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
 
     private void OnEnable()
     {
+        Shader.SetGlobalFloat(DebugViewId, view);
         activeTrunkScene = trunkScene;
         activePropagation = propagation;
         skyboxProbeRequested = false;
@@ -380,6 +385,9 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
 
     private void Update()
     {
+        if (view == NativeUrpView)
+            return;
+
         if (activePropagation != propagation || activeTrunkScene != trunkScene)
         {
             OnDisable();
@@ -404,7 +412,7 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
 
     private void LateUpdate()
     {
-        if (!showProbes || volume == null || !SystemInfo.supportsInstancing)
+        if (view == NativeUrpView || !showProbes || volume == null || !SystemInfo.supportsInstancing)
             return;
 
         if (probeMarkerMaterial == null)
@@ -481,9 +489,9 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
         }
 
         UploadEnvironmentLighting();
+        Shader.SetGlobalFloat("_LrtProbeNormalOffset", Mathf.Max(0f, probeNormalOffset));
         Shader.SetGlobalFloat("_LrtSkySampleRadius", blueNoise != null ? probeSampleRadius : 0f);
         Shader.SetGlobalFloat("_LrtSkyOcclusionStrength", Mathf.Clamp01(skyOcclusionStrength));
-        Shader.SetGlobalFloat("_LrtTrunkDebug", view);
         return true;
     }
 
@@ -840,7 +848,15 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
     internal bool HasDemoLight => demoLight != null;
     internal bool IsDemoPropVisible => demoProp != null && demoProp.gameObject.activeSelf;
     internal bool IsDemoLightOn => demoLight != null && demoLight.enabled;
-    internal int DebugView { get => view; set => view = value; }
+    internal int DebugView
+    {
+        get => view;
+        set
+        {
+            view = value;
+            Shader.SetGlobalFloat(DebugViewId, view);
+        }
+    }
     internal bool ShowProbes { get => showProbes; set => showProbes = value; }
     internal string TrunkStatus => trunkScene != null
         ? $"{trunkScene.TrunkCount} trunks  /  {trunkScene.LastUpdatedTrunks} rebuilt in last update"
@@ -885,7 +901,7 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
         GUILayout.Label(ProbeGridTitle);
         if (volume != null)
         {
-            view = GUILayout.Toolbar(view, Views);
+            DebugView = GUILayout.Toolbar(view, Views);
             if (trunkScene != null)
             {
                 GUILayout.Label(TrunkStatus);
@@ -921,6 +937,7 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
     private void OnDisable()
     {
         gridSupported = false;
+        Shader.SetGlobalFloat(DebugViewId, 0);
         if (probeMarkerMaterial != null)
         {
             if (Application.isPlaying)
@@ -931,7 +948,6 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
         }
         if (volume != null)
         {
-            Shader.SetGlobalFloat("_LrtTrunkDebug", 0);
             Shader.SetGlobalVector("_LrtCellSpacing", Vector4.zero);
             Shader.SetGlobalTexture("_LrtVolume", null);
         }

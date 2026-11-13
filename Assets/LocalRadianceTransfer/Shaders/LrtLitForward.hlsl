@@ -11,10 +11,14 @@
 
 float _LrtTrunkDebug;
 float _LrtSkyOcclusionStrength;
+// Keep in sync with LocalRadianceTransferDemo.NativeUrpView.
+static const float LRT_NATIVE_URP_VIEW = 4.0;
 
 half4 LrtFragmentPBR(InputData inputData, SurfaceData surfaceData)
 {
-    if (_LrtScreenSpaceGIReady > 0.0 && _Surface < 0.5 && LrtHasProbes(inputData.positionWS))
+    [branch]
+    if (_LrtTrunkDebug != LRT_NATIVE_URP_VIEW && _LrtScreenSpaceGIReady > 0.0 &&
+        _Surface < 0.5 && LrtHasProbes(inputData.positionWS))
     {
         float4 field = LrtReadScreenSpaceGI(inputData.normalizedScreenSpaceUV);
         half skyVisibility = lerp(1.0, saturate(field.a), _LrtSkyOcclusionStrength);
@@ -28,9 +32,7 @@ half4 LrtFragmentPBR(InputData inputData, SurfaceData surfaceData)
             : field.rgb + LrtEnvironmentLighting(inputData.normalWS) * skyVisibility;
     }
     
-    //return half4(inputData.bakedGI, 1);
-
-    return UniversalFragmentPBR(inputData, surfaceData) ;
+    return UniversalFragmentPBR(inputData, surfaceData);
 }
 
 // Route the stock Lit forward fragment through the indirect lighting inputs above.

@@ -29,6 +29,7 @@ public sealed class LrtScreenSpaceGather : ScriptableRendererFeature
     public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
     {
         if (pass == null || renderingData.cameraData.isPreviewCamera ||
+            Shader.GetGlobalFloat(LocalRadianceTransferDemo.DebugViewId) == LocalRadianceTransferDemo.NativeUrpView ||
             Shader.GetGlobalVector(CellSpacingId).x <= 0f)
             return;
 

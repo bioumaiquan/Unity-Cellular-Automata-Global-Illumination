@@ -11,6 +11,7 @@ TEXTURE2D(_LrtBlueNoise);
 float2 _LrtBlueNoiseSize;
 uint _LrtProbeLayoutTextureWidth;
 float4 _LrtGridDimensions;
+float _LrtProbeNormalOffset;
 float _LrtSkySampleRadius;
 
 float4 LrtSampleCoefficient(float3 uv, float coefficient)
@@ -71,7 +72,7 @@ float4 LrtSampleProbes(float3 positionWS, float3 normal, uint2 gatherPixel)
 {
     float3 cellNormal = normalize(normal / _LrtCellSpacing);
     float3 gridPosition = (positionWS - _LrtGridOrigin.xyz) / _LrtCellSpacing;
-    float3 cell = gridPosition + cellNormal;
+    float3 cell = gridPosition + cellNormal * _LrtProbeNormalOffset;
     [branch] if (_LrtSkySampleRadius <= 0.0)
     {
         float4 field = LrtSampleDirectionalField(cell, normal);
