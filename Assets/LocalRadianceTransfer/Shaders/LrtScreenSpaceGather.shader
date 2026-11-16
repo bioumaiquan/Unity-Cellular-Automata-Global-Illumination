@@ -11,7 +11,7 @@ Shader "Hidden/Local Radiance Transfer/Screen Space Gather"
             Cull Off
 
             HLSLPROGRAM
-            #pragma target 3.5
+            #pragma target 4.5
             #pragma vertex Vert
             #pragma fragment Frag
 

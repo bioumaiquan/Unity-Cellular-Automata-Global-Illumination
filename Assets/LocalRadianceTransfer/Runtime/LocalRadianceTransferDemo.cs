@@ -86,7 +86,6 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
     private RenderTexture volume;
     private RenderTexture fineVolume;
     private ComputeBuffer probeLayoutBuffer;
-    private Texture2D probeLayoutTexture;
     private LrtProbeLayout probeLayout;
     private int publishKernel;
     private bool mixedOutputDirty;
@@ -241,7 +240,6 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
         RenderTexture newVolume = null;
         RenderTexture newFineVolume = null;
         ComputeBuffer newLayoutBuffer = null;
-        Texture2D newLayoutTexture = null;
         ComputeBuffer newInjection = null;
         ComputeBuffer newRead = null;
         ComputeBuffer newWrite = null;
@@ -255,28 +253,6 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
                 newFineVolume = CreateVolume(fineSize, CoefficientsPerProbe, VolumeFormat, "LRT fine probe bricks");
                 newLayoutBuffer = new ComputeBuffer(newLayout.Bricks.Length, 4 * sizeof(int));
                 newLayoutBuffer.SetData(newLayout.Bricks);
-                // Fragment shaders read the edge and slot through a texture on GLES.
-                int layoutWidth = Mathf.Min(newLayout.Bricks.Length, SystemInfo.maxTextureSize);
-                int layoutHeight = 1 + (newLayout.Bricks.Length - 1) / layoutWidth;
-                if (layoutHeight > SystemInfo.maxTextureSize)
-                    throw new InvalidOperationException("The probe layout texture exceeds this device's size limit.");
-
-                newLayoutTexture = new Texture2D(layoutWidth, layoutHeight, GraphicsFormat.R8G8B8A8_UNorm,
-                    TextureCreationFlags.None)
-                {
-                    name = "LRT probe layout",
-                    filterMode = FilterMode.Point,
-                    wrapMode = TextureWrapMode.Clamp
-                };
-                var layoutTexels = newLayoutTexture.GetRawTextureData<Color32>();
-                // The slot fits in RGB (bounded by MaxProbeCount), and the edge fits in A.
-                for (int i = 0; i < newLayout.Bricks.Length; i++)
-                {
-                    var brick = newLayout.Bricks[i];
-                    layoutTexels[i] = new Color32((byte)(brick.Slot & 255), (byte)((brick.Slot >> 8) & 255),
-                        (byte)(brick.Slot >> 16), (byte)brick.Edge);
-                }
-                newLayoutTexture.Apply(updateMipmaps: false, makeNoLongerReadable: true);
                 newInjection = new ComputeBuffer(cellCount * 6, ProbeStride);
             }
             else
@@ -295,7 +271,6 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
             DestroyVolume(newVolume);
             DestroyVolume(newFineVolume);
             newLayoutBuffer?.Release();
-            DestroyTexture(newLayoutTexture);
             newInjection?.Release();
             newRead?.Release();
             newWrite?.Release();
@@ -308,7 +283,6 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
         fineVolume = newFineVolume;
         probeLayout = newLayout;
         probeLayoutBuffer = newLayoutBuffer;
-        probeLayoutTexture = newLayoutTexture;
         injection = newInjection;
         propagateKernel = propagation.FindKernel(probeLayout != null ? "PropagateMixed" : "PropagateTrunks");
         injectionKernel = propagation.FindKernel(probeLayout != null ? "InjectMixed" : "InjectTrunks");
@@ -333,8 +307,6 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
         {
             Shader.SetGlobalTexture("_LrtFineVolume", fineVolume);
             Shader.SetGlobalBuffer("_LrtProbeLayout", probeLayoutBuffer);
-            Shader.SetGlobalTexture("_LrtProbeLayoutTexture", probeLayoutTexture);
-            Shader.SetGlobalInteger("_LrtProbeLayoutTextureWidth", probeLayoutTexture.width);
             Shader.SetGlobalVector("_LrtProbeTrunkDimensions", (Vector3)(size / trunkSize));
             Shader.SetGlobalVector("_LrtCoarseAtlasSize", new Vector4(volume.width, volume.height, volume.volumeDepth));
             Shader.SetGlobalVector("_LrtFineAtlasSize", new Vector4(fineVolume.width, fineVolume.height, fineVolume.volumeDepth));
@@ -970,9 +942,6 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
         mixedOutputDirty = false;
         Shader.SetGlobalInt("_LrtMixedEnabled", 0);
         Shader.SetGlobalTexture("_LrtFineVolume", null);
-        Shader.SetGlobalTexture("_LrtProbeLayoutTexture", null);
-        DestroyTexture(probeLayoutTexture);
-        probeLayoutTexture = null;
         skyRayCount = 0;
         skyNextCell = 0;
         skyUpdateRequested = false;
@@ -1012,13 +981,6 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
         if (texture == null)
             return;
         texture.Release();
-        DestroyTexture(texture);
-    }
-
-    private static void DestroyTexture(Texture texture)
-    {
-        if (texture == null)
-            return;
         if (Application.isPlaying)
             Destroy(texture);
         else

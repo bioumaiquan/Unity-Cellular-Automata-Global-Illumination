@@ -6,10 +6,8 @@
 TEXTURE3D(_LrtVolume);
 SAMPLER(sampler_LrtVolume);
 #include "LrtProbeAtlas.hlsl"
-TEXTURE2D_FLOAT(_LrtProbeLayoutTexture);
 TEXTURE2D(_LrtBlueNoise);
 float2 _LrtBlueNoiseSize;
-uint _LrtProbeLayoutTextureWidth;
 float4 _LrtGridDimensions;
 float _LrtProbeNormalOffset;
 float _LrtSkySampleRadius;
@@ -25,11 +23,9 @@ float4 LrtSampleAtlasField(float3 position, float3 normal)
     float3 grid = clamp((position - _LrtGridOrigin.xyz) / _LrtProbeTrunkEdge, 0.0,
         _LrtProbeTrunkDimensions.xyz - 0.0001);
     uint3 trunk = uint3(grid);
-    uint index = LrtWorldTrunkIndex(trunk);
-    uint2 texel = uint2(index % _LrtProbeLayoutTextureWidth, index / _LrtProbeLayoutTextureWidth);
-    uint4 brick = (uint4)round(LOAD_TEXTURE2D(_LrtProbeLayoutTexture, texel) * 255.0);
-    uint slot = brick.r | (brick.g << 8u) | (brick.b << 16u);
-    uint edge = brick.a;
+    uint4 brick = _LrtProbeLayout[LrtWorldTrunkIndex(trunk)];
+    uint edge = brick.y;
+    uint slot = brick.z;
     bool fine = edge == (uint)_LrtFineProbeEdge;
     float3 address = LrtAtlasBrickOrigin(slot, edge) + 1.0 + (grid - trunk) * edge;
     float3 uv = address / (fine ? _LrtFineAtlasSize.xyz : _LrtCoarseAtlasSize.xyz);

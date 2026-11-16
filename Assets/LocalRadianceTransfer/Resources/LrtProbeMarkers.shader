@@ -18,7 +18,6 @@ Shader "Hidden/Local Radiance Transfer/Probe Markers"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
             TEXTURE3D(_LrtVolume);
-            StructuredBuffer<uint4> _LrtProbeLayout;
             #include "../Shaders/LrtProbeAtlas.hlsl"
             float4 _LrtGridOrigin;
             float3 _LrtCellSpacing;

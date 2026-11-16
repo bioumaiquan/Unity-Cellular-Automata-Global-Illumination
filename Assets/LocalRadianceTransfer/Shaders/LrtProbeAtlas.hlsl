@@ -2,6 +2,7 @@
 #define LRT_PROBE_ATLAS_INCLUDED
 
 TEXTURE3D(_LrtFineVolume);
+StructuredBuffer<uint4> _LrtProbeLayout;
 int _LrtMixedEnabled;
 int _LrtFineProbeEdge;
 float _LrtProbeTrunkEdge;
