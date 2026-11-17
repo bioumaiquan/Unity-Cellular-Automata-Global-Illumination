@@ -57,7 +57,7 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
     [SerializeField, Min(0f), Tooltip("Offset along the surface normal in grid cells. Mixed layouts use the fine grid spacing. Set to 0 to disable.")]
     private float probeNormalOffset = 1f;
     [FormerlySerializedAs("skySampleRadius")]
-    [SerializeField, Range(0f, 1f)] private float probeSampleRadius = 0.5f;
+    [SerializeField, Range(0f, 0.5f)] private float probeSampleRadius = 0.1f;
     [SerializeField, Range(0f, 1f), Tooltip("Sky occlusion strength in the Sky visibility view.")]
     private float skyOcclusionStrength = 0.5f;
     [SerializeField] private SkyQuality skyVisibilityQuality = SkyQuality.Medium;

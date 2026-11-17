@@ -69,42 +69,27 @@ float4 LrtSampleProbes(float3 positionWS, float3 normal, uint2 gatherPixel)
     float3 cellNormal = normalize(normal / _LrtCellSpacing);
     float3 gridPosition = (positionWS - _LrtGridOrigin.xyz) / _LrtCellSpacing;
     float3 cell = gridPosition + cellNormal * _LrtProbeNormalOffset;
-    [branch] if (_LrtSkySampleRadius <= 0.0)
+    
+    [branch] if (_LrtSkySampleRadius > 0.0)
     {
-        float4 field = LrtSampleDirectionalField(cell, normal);
-        return float4(max(field.rgb, GI_LUMINANCE_MIN), saturate(field.a));
-    }
-    else
-    {
-        float3 referenceAxis = abs(normal.y) < 0.99 ? float3(0, 1, 0) : float3(0, 0, 1);
-        float3 tangent = normalize(cross(normal, referenceAxis));
-        float3 bitangent = cross(normal, tangent);
-        // Tile at one blue-noise texel per gather pixel, independent of camera distance.
-        uint2 tileSize = uint2(_LrtBlueNoiseSize);
-        uint2 firstTexel = gatherPixel % tileSize;
-        uint2 secondTexel = (gatherPixel + uint2(5, 9)) % tileSize;
-        float2 noise = float2(
-            LOAD_TEXTURE2D(_LrtBlueNoise, firstTexel).r,
-            LOAD_TEXTURE2D(_LrtBlueNoise, secondTexel).r);
-        float4 field = 0.0;
+        // Tile the same blue-noise pattern at one texel per gather pixel each frame.
+        float2 uv = (float2(gatherPixel) + 0.5) / _LrtBlueNoiseSize;
+        float noise = SAMPLE_TEXTURE2D_LOD(_LrtBlueNoise, sampler_PointRepeat, uv, 0).r;
 
-        // Jitter one sample in each 2x2 stratum and map the disk to the cosine-weighted hemisphere.
-        // Keep a single atlas lookup path across taps. Each tap can land in a different brick.
-        [loop] for (uint sampleIndex = 0u; sampleIndex < 4u; sampleIndex++)
-        {
-            // Rotate the blue-noise pair differently in each stratum.
-            float2 jitter = frac(noise + float2(0.754877666, 0.569840296) * sampleIndex);
-            float2 u = (float2(sampleIndex & 1u, sampleIndex >> 1u) + jitter) * 0.5;
-            float sine, cosine;
-            sincos(TWO_PI * u.y, sine, cosine);
-            float3 direction = sqrt(u.x) * (cosine * tangent + sine * bitangent)
-                             + sqrt(saturate(1.0 - u.x)) * normal;
-            float3 offset = normalize(direction / _LrtCellSpacing) * _LrtSkySampleRadius;
-            field += LrtSampleDirectionalField(cell + offset, normal);
-        }
-        field *= 0.25;
-        return float4(max(field.rgb, GI_LUMINANCE_MIN), saturate(field.a));
+        // URP SSAO's blue-noise direction for sample index 0, evaluated in world space.
+        float z = frac(noise) * 2.0 - 1.0;
+        float theta = (0.9296875 + noise) * (TWO_PI * 100.0);
+        float xy = sqrt(saturate(1.0 - z * z));
+        float sine, cosine;
+        sincos(theta, sine, cosine);
+        float3 direction = float3(xy * cosine, xy * sine, z);
+        direction *= dot(normal, direction) >= 0.0 ? 1.0 : -1.0;
+        cell += normalize(direction / _LrtCellSpacing) * _LrtSkySampleRadius;
     }
+    
+    float4 field = LrtSampleDirectionalField(cell, normal);
+
+    return float4(max(field.rgb, GI_LUMINANCE_MIN), saturate(field.a));
 }
 
 #endif
