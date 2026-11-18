@@ -24,6 +24,7 @@ uint _SkyEndCell;
 uint _SkyRayCount;
 float4 _LrtGridOrigin;
 float3 _LrtCellSpacing;
+float _LrtAirTransmissionPerMeter;
 float4 _LrtSunDirection;
 float4 _LrtSunColor;
 
@@ -381,6 +382,7 @@ void PropagateCell(uint3 id)
 #ifdef LRT_MIXED_PROBES
         int3 neighbor;
         uint neighborIndex;
+        float travelDistance = spacing;
         int3 direction = Directions[face];
         int3 localNeighbor = local + direction;
         bool inside = true;
@@ -390,10 +392,15 @@ void PropagateCell(uint3 id)
             neighbor = GeometryCell(center + direction * spacing);
         }
         else
+        {
             inside = MixedNeighbor(center, spacing, direction, neighborIndex, neighbor);
+            if (inside)
+                travelDistance = distance(center, MixedProbePosition(neighborIndex));
+        }
 #else
         int3 neighbor = p + Directions[face];
         bool inside = Inside(neighbor);
+        float travelDistance = length(float3(Directions[face]) * _LrtCellSpacing);
 #endif
         incoming[face] = 0.0;
         openFace[face] = true;
@@ -406,6 +413,11 @@ void PropagateCell(uint3 id)
             [branch] if (voxel.a != 0)
                 openFace[face] = ReadVoxel(VoxelIndex(neighbor)).a == 0;
             incoming[face] = openFace[face] ? ReadIncoming(neighborIndex, face) : 0.0;
+            // Attenuate each incoming path before mixing, since center distances
+            // differ at coarse/fine boundaries. Keep surface reflection unchanged.
+            if (voxel.a == 0)
+                incoming[face].rgb *= _LrtAirTransmissionPerMeter > 0.0
+                    ? pow(saturate(_LrtAirTransmissionPerMeter), travelDistance) : 0.0;
         }
     }
 
@@ -435,7 +447,6 @@ void PropagateCell(uint3 id)
                 if (from != lobe)
                     outgoing += incoming[from] * (from == (lobe ^ 1) ? 0.68 : 0.08);
             }
-            outgoing.rgb *= 0.92;
         }
         else if (openFace[lobe])
         {

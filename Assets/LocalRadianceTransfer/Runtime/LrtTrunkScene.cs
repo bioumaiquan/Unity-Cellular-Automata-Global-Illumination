@@ -434,7 +434,7 @@ public sealed class LrtTrunkScene : MonoBehaviour
     private void Rebuild(Trunk trunk)
     {
         Vector3 first = origin + Vector3.Scale(trunk.Coordinate, trunkExtent) + spacing * 0.5f;
-        float shell = Mathf.Min(spacing.x, spacing.y, spacing.z) * 0.3f;
+        float shell = 0f;
         Array.Clear(staging, 0, staging.Length);
         for (int i = 0; i < nearestDistance.Length; i++)
             nearestDistance[i] = shell;

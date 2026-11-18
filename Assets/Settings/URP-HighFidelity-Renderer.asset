@@ -81,4 +81,4 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   m_Active: 1
   gatherShader: {fileID: 4800000, guid: 814689a5f8484cef9b9f520013ca6ffb, type: 3}
-  resolutionScale: 0.5
+  resolutionScale: 1

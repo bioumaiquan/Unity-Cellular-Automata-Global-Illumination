@@ -27757,7 +27757,8 @@ MonoBehaviour:
   probeDrawStride: 1
   probeNormalOffset: 1
   probeSampleRadius: 0
-  skyOcclusionStrength: 0.808
+  skyOcclusionStrength: 0.872
+  airTransmissionPerMeter: 0.95
   skyVisibilityQuality: 9
   skyProbesPerFrame: 4096
   stepsPerFrame: 1
@@ -41795,7 +41796,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 415190, guid: 3304962fe53865c45b84d9dd03195d53, type: 3}
       propertyPath: m_LocalPosition.z
-      value: 40.057
+      value: 39.99
       objectReference: {fileID: 0}
     - target: {fileID: 415190, guid: 3304962fe53865c45b84d9dd03195d53, type: 3}
       propertyPath: m_LocalRotation.w

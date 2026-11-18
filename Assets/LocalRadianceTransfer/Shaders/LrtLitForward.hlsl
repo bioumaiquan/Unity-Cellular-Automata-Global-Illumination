@@ -25,12 +25,20 @@ half4 LrtFragmentPBR(InputData inputData, SurfaceData surfaceData)
         if (_LrtTrunkDebug == 2)
             return half4(field.rgb, 1);
         if (_LrtTrunkDebug == 3)
-            return half4(LrtEnvironmentLighting(inputData.normalWS) * skyVisibility, 1);
+            return half4(skyVisibility.xxx, 1);
 
         inputData.bakedGI = _LrtTrunkDebug == 1
             ? half3(0, 0, 0)
             : field.rgb + LrtEnvironmentLighting(inputData.normalWS) * skyVisibility;
+        
+        // inputData.bakedGI = field.rgb;
+        // if (inputData.bakedGI.r <= 0 & inputData.bakedGI.g <= 0 & inputData.bakedGI.b <= 0)
+        //     inputData.bakedGI = half3(1,0,0);
+        // else
+        //     inputData.bakedGI = half3(0,1,0);
     }
+    
+    //return half4(inputData.bakedGI, 1);
     
     return UniversalFragmentPBR(inputData, surfaceData);
 }

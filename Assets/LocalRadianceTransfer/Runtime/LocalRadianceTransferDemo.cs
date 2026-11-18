@@ -60,6 +60,8 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
     [SerializeField, Range(0f, 0.5f)] private float probeSampleRadius = 0.1f;
     [SerializeField, Range(0f, 1f), Tooltip("Sky occlusion strength in the Sky visibility view.")]
     private float skyOcclusionStrength = 0.5f;
+    [SerializeField, Range(0.5f, 0.98f), Tooltip("Fraction of indirect RGB retained per world-space meter. Higher values reduce attenuation; 1 disables air attenuation. Changing this restarts propagation.")]
+    private float airTransmissionPerMeter = 0.95f;
     [SerializeField] private SkyQuality skyVisibilityQuality = SkyQuality.Medium;
     [SerializeField, Min(SkyThreadsPerGroup)] private int skyProbesPerFrame = 16384;
     [SerializeField, Range(1, 4)] private int stepsPerFrame = 2;
@@ -125,6 +127,7 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
     private int view;
     private bool geometryDirty;
     private int remainingIterations;
+    private float lastAirTransmissionPerMeter = -1f;
     private Vector4 sunDirection;
     private Vector4 sunColor;
 
@@ -460,6 +463,13 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
             injectionDirty = true;
         }
 
+        float transmission = Mathf.Clamp01(airTransmissionPerMeter);
+        if (transmission != lastAirTransmissionPerMeter)
+        {
+            lastAirTransmissionPerMeter = transmission;
+            remainingIterations = Mathf.Max(1, propagationIterations);
+        }
+
         UploadEnvironmentLighting();
         Shader.SetGlobalFloat("_LrtProbeNormalOffset", Mathf.Max(0f, probeNormalOffset));
         Shader.SetGlobalFloat("_LrtSkySampleRadius", blueNoise != null ? probeSampleRadius : 0f);
@@ -534,6 +544,7 @@ public sealed class LocalRadianceTransferDemo : MonoBehaviour
         propagation.SetInt("_CellsPerTrunk", activeTrunkSize * activeTrunkSize * activeTrunkSize);
         propagation.SetVector("_LrtGridOrigin", gridOrigin);
         propagation.SetVector("_LrtCellSpacing", cellSpacing);
+        propagation.SetFloat("_LrtAirTransmissionPerMeter", Mathf.Clamp01(airTransmissionPerMeter));
     }
 
     private void SetMixedGrid(int kernel)
