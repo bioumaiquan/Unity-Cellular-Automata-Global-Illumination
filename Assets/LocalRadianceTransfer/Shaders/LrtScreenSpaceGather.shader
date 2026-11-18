@@ -17,70 +17,31 @@ Shader "Hidden/Local Radiance Transfer/Screen Space Gather"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+            TEXTURE2D_X(_LrtDepthNormalTexture);
+            TEXTURE2D_X_FLOAT(_LrtDepthNormalDepth);
             #include "LrtProbeSampling.hlsl"
-
-            bool LrtHasSceneDepth(float depth)
-            {
-                #if UNITY_REVERSED_Z
-                    return depth > 0.0;
-                #else
-                    return depth < 1.0;
-                #endif
-            }
-
-            float3 LrtUnprojectDepth(int2 pixel, float2 invScreenSize, float depth)
-            {
-                #if !UNITY_REVERSED_Z
-                    depth = lerp(UNITY_NEAR_CLIP_VALUE, 1.0, depth);
-                #endif
-                float2 uv = (float2(pixel) + 0.5) * invScreenSize;
-                return ComputeWorldSpacePosition(uv, depth, UNITY_MATRIX_I_VP);
-            }
-
-            float3 LrtDepthTangent(int2 pixel, int2 axis, int2 screenSize, float2 invScreenSize,
-                float depth, float3 positionWS)
-            {
-                int2 before = pixel - axis;
-                int2 after = pixel + axis;
-                float beforeDepth = LoadSceneDepth(clamp(before, 0, screenSize - 1));
-                float afterDepth = LoadSceneDepth(clamp(after, 0, screenSize - 1));
-                bool beforeValid = all(before >= 0) && LrtHasSceneDepth(beforeDepth);
-                bool afterValid = all(after < screenSize) && LrtHasSceneDepth(afterDepth);
-
-                // Prefer the neighbor with the smaller depth discontinuity.
-                if (beforeValid && (!afterValid || abs(beforeDepth - depth) < abs(afterDepth - depth)))
-                    return positionWS - LrtUnprojectDepth(before, invScreenSize, beforeDepth);
-                if (afterValid)
-                    return LrtUnprojectDepth(after, invScreenSize, afterDepth) - positionWS;
-                return 0.0;
-            }
 
             float4 Frag(Varyings input) : SV_Target
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
 
-                int2 screenSize = int2(GetScaledScreenParams().xy);
-                float2 invScreenSize = rcp(float2(screenSize));
-                int2 pixel = min(int2(input.texcoord * screenSize), screenSize - 1);
-                float depth = LoadSceneDepth(pixel);
-                if (!LrtHasSceneDepth(depth))
-                    return LRT_UNOCCLUDED_GI;
-
-                float3 positionWS = LrtUnprojectDepth(pixel, invScreenSize, depth);
+                // Both targets have the same dimensions. Load without filtering across surfaces.
+                uint2 pixel = uint2(input.positionCS.xy);
+                float deviceDepth = LOAD_TEXTURE2D_X(_LrtDepthNormalDepth, pixel).r;
+                #if UNITY_REVERSED_Z
+                    if (deviceDepth <= 0.0)
+                        return LRT_UNOCCLUDED_GI;
+                #else
+                    if (deviceDepth >= 1.0)
+                        return LRT_UNOCCLUDED_GI;
+                    deviceDepth = lerp(UNITY_NEAR_CLIP_VALUE, 1.0, deviceDepth);
+                #endif
+                float3 positionWS = ComputeWorldSpacePosition(input.texcoord, deviceDepth, UNITY_MATRIX_I_VP);
                 if (!LrtHasProbes(positionWS))
                     return LRT_UNOCCLUDED_GI;
 
-                float3 dx = LrtDepthTangent(pixel, int2(1, 0), screenSize, invScreenSize, depth, positionWS);
-                float3 dy = LrtDepthTangent(pixel, int2(0, 1), screenSize, invScreenSize, depth, positionWS);
-                float3 normalWS = cross(dx, dy);
-                float normalLengthSq = dot(normalWS, normalWS);
-                if (normalLengthSq <= 0.0)
-                    return LRT_UNOCCLUDED_GI;
-
-                normalWS *= rsqrt(normalLengthSq);
-                if (dot(normalWS, GetWorldSpaceViewDir(positionWS)) < 0.0)
-                    normalWS = -normalWS;
+                float2 packedNormal = LOAD_TEXTURE2D_X(_LrtDepthNormalTexture, pixel).rg;
+                float3 normalWS = UnpackNormalOctQuadEncode(packedNormal * 2.0 - 1.0);
                 return LrtSampleProbes(positionWS, normalWS, uint2(input.positionCS.xy));
             }
             ENDHLSL

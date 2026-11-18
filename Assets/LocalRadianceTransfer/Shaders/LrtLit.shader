@@ -171,6 +171,36 @@ Shader "Local Radiance Transfer/Lit"
             ENDHLSL
         }
 
+        Pass
+        {
+            Name "LrtDepthNormals"
+            Tags { "LightMode" = "LrtDepthNormals" }
+            ZWrite On
+            ZTest LEqual
+            Cull[_Cull]
+
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma vertex DepthNormalsVertex
+            #pragma fragment LrtPackedDepthNormalsFragment
+            #pragma shader_feature_local _ALPHATEST_ON
+            #pragma shader_feature_local_fragment _SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A
+            #pragma multi_compile_instancing
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/Shaders/LitInput.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/Shaders/LitDepthNormalsPass.hlsl"
+
+            float4 LrtPackedDepthNormalsFragment(Varyings input) : SV_Target
+            {
+                half4 normal;
+                DepthNormalsFragment(input, normal);
+                float2 oct = PackNormalOctQuadEncode(normalize(float3(normal.xyz))) * 0.5 + 0.5;
+                // B is reserved for future use. Hardware writes depth to the depth attachment.
+                return float4(oct, 0, 0);
+            }
+            ENDHLSL
+        }
+
         // Declare the auxiliary passes here so the player does not have to resolve UsePass references.
         Pass
         {

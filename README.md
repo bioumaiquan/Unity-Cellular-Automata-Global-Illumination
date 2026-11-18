@@ -38,7 +38,7 @@
 
 ### 独立天空遮蔽
 
-**Sky Visibility Quality** 提供低、中、高三档，分别从每个空气探针向上半球采样 **5、9、17** 个方向，默认 **9**。遮挡射线沿途查询 Color SDF 合成的体素，并跨过空 Trunk。结果保存平均可见性与方向分量，Gather Pass 按从深度重建的表面法线求值。地面、墙边和屋檐下的遮蔽由可见方向决定。
+**Sky Visibility Quality** 提供低、中、高三档，分别从每个空气探针向上半球采样 **5、9、17** 个方向，默认 **9**。遮挡射线沿途查询 Color SDF 合成的体素，并跨过空 Trunk。结果保存平均可见性与方向分量，Gather Pass 按 Depth Normal 预通道输出的表面法线求值。地面、墙边和屋檐下的遮蔽由可见方向决定。
 
 **Sky Probes Per Frame** 控制每帧最多处理多少探针，组件默认 **16,384**，Demo_D_LRT 保存为 **4,096**。几何或质量档位变化会更新天空缓存，灯光变化只更新颜色反弹。每批天空结果计算完成后立即写入纹理。首轮尚未处理的空气探针使用全可见天空，后续轮次中尚未处理的探针沿用旧值。几何在批次中途变化时会排入下一次更新。
 
@@ -72,7 +72,7 @@ LRT 收集同一场景中的 LRT Light 组件。Demo_D_LRT 已为参与 GI 的�
 
 ## Screen Space Gather
 
-Gather Pass 在深度预通道之后、绘制不透明物体之前运行。它从 `_CameraDepthTexture` 重建世界位置，并在水平、垂直方向各选取与中心深度最接近的有效邻点，用两条切线的叉积重建世界空间几何法线。每个 Gather 像素将位置换算为探针坐标，沿法线偏移约一格，再按与表面法线相反的方向求值。结果写入独立的 RGBA16F RT，RGB 保存反弹光，A 保存天光可见性。 [Gather Shader](LocalRadianceTransfer/Shaders/LrtScreenSpaceGather.shader) · [探针采样](LocalRadianceTransfer/Shaders/LrtProbeSampling.hlsl)
+绘制不透明物体之前，LRT Depth Normal 预通道调用场景 LRT Lit Shader 的 `LrtDepthNormals` Pass，将世界空间法线用八面体映射编码到 RGB111110 RT 的 RG 通道，B 通道写零并预留给后续扩展。预通道和 Gather 使用相同的 Resolution Scale。预通道的深度附件用于可见性测试，结束后以 Store 保留内容，直接绑定给 Gather 采样。Gather 从 RG 解码法线，并读取深度附件的原始硬件深度重建世界位置。每个 Gather 像素将位置换算为探针坐标，沿法线偏移约一格，再按与表面法线相反的方向求值。结果写入独立的 RGBA16F RT，RGB 保存反弹光，A 保存天光可见性。 [Gather Shader](LocalRadianceTransfer/Shaders/LrtScreenSpaceGather.shader) · [探针采样](LocalRadianceTransfer/Shaders/LrtProbeSampling.hlsl)
 
 **Probe Sample Radius** 大于 `0` 且蓝噪声纹理可用时，Gather 对朝外半球的四个分层样本求平均。偏移半径以基础网格格距计，混合密度模式使用细体素格距。抖动以 Gather RT 的像素坐标索引，一个 Gather 像素对应一个蓝噪声纹素，镜头拉近时噪声图案保持相同的屏幕尺度。 [BlueNoise 贴图](LocalRadianceTransfer/Resources/BlueNoise.png)
 
@@ -88,11 +88,13 @@ Gather Pass 在深度预通道之后、绘制不透明物体之前运行。它�
 | --- | --- |
 | Trunk 存储 | 两份球谐传播缓冲合计每探针 `128 B`。混合密度图集按砖块边缘和实际图集尺寸分配，另计细体素及注入缓存。 |
 | 球谐节省 | 与原六轴布局相比，输出体纹理和两份传播缓冲各节省约 `33%`。 |
-| Gather 与材质采样 | Gather 对每个有效像素读取中心及相邻深度。Probe 单点模式读取 4 个 3D 球谐系数，四点半球模式最多读取 16 次 3D 纹理和两次蓝噪声。混合密度模式每个 Probe 采样位置另读一次 2D 布局纹理。Base Pass 对有 LRT GI 的像素读取一次 2D Gather RT。 |
+| Gather 与材质采样 | Gather 对每个有效像素读取一次 RGB111110 法线 RT 和一次预通道深度附件。Probe 单点模式读取 4 个 3D 球谐系数，四点半球模式最多读取 16 次 3D 纹理和两次蓝噪声。混合密度模式每个 Probe 采样位置另读一次 2D 布局纹理。Base Pass 对有 LRT GI 的像素读取一次 2D Gather RT。 |
 | Trunk 注入与传播 | 注入重算开销随暴露体素面、灯光数量和遮挡遍历成本增加。每盏面光对一个受光面最多发起四条遮挡测试。缓存就绪后，每轮传播开销主要取决于实际探针数。 |
 | 设备与容量 | 需要 Compute Shader 和可随机写入、可线性过滤的 RGBA16F 3D 纹理。均匀布局上限为 `1,048,576` 个探针。混合密度布局将同一上限用于细体素网格，另检查图集尺寸和注入缓冲容量。 |
 
 ## Android 打包
+
+Gather 的深度附件使用兼容的深度渲染格式、单采样和非 Memoryless 配置，预通道显式 Store 法线与深度内容。启动时检查深度 RT 和颜色格式支持，附件创建失败时跳过 Gather，并用 LRT 日志记录设备、图形 API 和格式。每个相机开始时重置 GI 就绪标志，避免读取旧帧。真机出现异常时可在 Logcat 中筛选 LRT。
 
 [Build Settings](../ProjectSettings/EditorBuildSettings.asset) 中 **Demo_D_LRT** 是启用的构建场景。设备需要支持 Compute Shader，以及可随机写入、可线性过滤的 RGBA16F 3D 纹理。编辑器的烘焙工具使用 Inspector 中的灯光模式，Android Player 通过 `Light.bakingOutput.lightmapBakeType` 判断纯烘焙灯。**Bake Resolution** 属于编辑器工具。
 
@@ -120,7 +122,7 @@ Android Player 和 Editor 的 C# 编译均已验证。最近一次 Unity 日志�
 | [LrtLighting.hlsl](LocalRadianceTransfer/Shaders/LrtLighting.hlsl) | 光源衰减与体素遮挡接口。 |
 | [LrtPropagation.compute](LocalRadianceTransfer/Shaders/LrtPropagation.compute) | 体素遮挡、局部注入、邻域传播、球谐投影。 |
 | [LrtProbeSampling.hlsl](LocalRadianceTransfer/Shaders/LrtProbeSampling.hlsl) | 探针系数取样、半球滤波与屏幕空间蓝噪声。 |
-| [LrtScreenSpaceGather.cs](LocalRadianceTransfer/Runtime/Rendering/LrtScreenSpaceGather.cs) · [LrtScreenSpaceGather.shader](LocalRadianceTransfer/Shaders/LrtScreenSpaceGather.shader) | URP Pass 调度、低分辨率 RT、深度重建法线与探针求值。 |
+| [LrtScreenSpaceGather.cs](LocalRadianceTransfer/Runtime/Rendering/LrtScreenSpaceGather.cs) · [LrtScreenSpaceGather.shader](LocalRadianceTransfer/Shaders/LrtScreenSpaceGather.shader) | URP Pass 调度、低分辨率 RT、打包深度法线预通道与探针求值。 |
 | [LrtScreenSpaceGI.hlsl](LocalRadianceTransfer/Shaders/LrtScreenSpaceGI.hlsl) · [LrtIndirectLighting.hlsl](LocalRadianceTransfer/Shaders/LrtIndirectLighting.hlsl) | Base Pass 读取 Gather RT、探针体积检查与环境光求值。 |
 | [LrtLit.shader](LocalRadianceTransfer/Shaders/LrtLit.shader) · [LrtLitForward.hlsl](LocalRadianceTransfer/Shaders/LrtLitForward.hlsl) | URP Lit 材质和间接光接入。 |
 | [LrtColorSdf.cs](LocalRadianceTransfer/Runtime/LrtColorSdf.cs) · [LrtColorSdfBaker.cs](LocalRadianceTransfer/Editor/LrtColorSdfBaker.cs) | 逐 Prefab 的局部距离场和表面颜色数据及其烘焙。 |
